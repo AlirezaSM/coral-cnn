@@ -23,10 +23,10 @@ from PIL import Image
 
 torch.backends.cudnn.deterministic = True
 
-TRAIN_CSV_PATH = './afad_train.csv'
-VALID_CSV_PATH = './afad_valid.csv'
-TEST_CSV_PATH = './afad_test.csv'
-IMAGE_PATH = '/shared_datasets/AFAD/orig/tarball/AFAD-Full'
+TRAIN_CSV_PATH = '../datasets/my_afad_train_0.2_3.csv'
+VALID_CSV_PATH = '../datasets/my_afad_valid.csv'
+TEST_CSV_PATH = '../datasets/my_afad_test.csv'
+IMAGE_PATH = '/home/vision/alireza-sm/datasets/AFAD-Full'
 
 
 # Argparse helper
@@ -101,7 +101,7 @@ with open(LOGFILE, 'w') as f:
 
 # Hyperparameters
 learning_rate = 0.0005
-num_epochs = 200
+num_epochs = 50
 
 # Architecture
 NUM_CLASSES = 26
@@ -158,7 +158,7 @@ class AFADDatasetAge(Dataset):
 
     def __getitem__(self, index):
         img = Image.open(os.path.join(self.img_dir,
-                                      self.img_paths[index]))
+                                      self.img_paths.iloc[index]))
 
         if self.transform is not None:
             img = self.transform(img)
@@ -347,34 +347,45 @@ model.to(DEVICE)
 optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate) 
 
 
-def compute_mae_and_mse(model, data_loader, device):
-    mae, mse, num_examples = 0, 0, 0
+def compute_metrics(model, data_loader, device, cost_fn, imp):
+    mae, mse, loss, correct, num_examples = 0, 0, 0, 0, 0
     for i, (features, targets, levels) in enumerate(data_loader):
-
         features = features.to(device)
         targets = targets.to(device)
+        levels = levels.to(device)
 
         logits, probas = model(features)
         predict_levels = probas > 0.5
         predicted_labels = torch.sum(predict_levels, dim=1)
+
+        # Compute MAE and MSE
         num_examples += targets.size(0)
         mae += torch.sum(torch.abs(predicted_labels - targets))
         mse += torch.sum((predicted_labels - targets)**2)
+
+        # Compute Loss
+        cost = cost_fn(logits, levels, imp)
+        loss += cost.item() * features.size(0)
+
+        # Compute Accuracy
+        correct += torch.sum(predicted_labels == targets)
+
     mae = mae.float() / num_examples
     mse = mse.float() / num_examples
-    return mae, mse
+    loss = loss / num_examples
+    accuracy = (correct.float() / num_examples) * 100
+    return mae, torch.sqrt(mse), loss, accuracy
 
 
 start_time = time.time()
 
-best_mae, best_rmse, best_epoch = 999, 999, -1
+best_mae, best_rmse, best_loss, best_accuracy, best_epoch = 999, 999, 999, 0, -1
 for epoch in range(num_epochs):
 
     model.train()
     for batch_idx, (features, targets, levels) in enumerate(train_loader):
 
         features = features.to(DEVICE)
-        targets = targets
         targets = targets.to(DEVICE)
         levels = levels.to(DEVICE)
 
@@ -382,7 +393,6 @@ for epoch in range(num_epochs):
         logits, probas = model(features)
         cost = cost_fn(logits, levels, imp)
         optimizer.zero_grad()
-
         cost.backward()
 
         # UPDATE MODEL PARAMETERS
@@ -399,17 +409,16 @@ for epoch in range(num_epochs):
 
     model.eval()
     with torch.set_grad_enabled(False):
-        valid_mae, valid_mse = compute_mae_and_mse(model, valid_loader,
-                                                   device=DEVICE)
+        valid_mae, valid_rmse, valid_loss, valid_accuracy = compute_metrics(
+            model, valid_loader, device=DEVICE, cost_fn=cost_fn, imp=imp)
 
     if valid_mae < best_mae:
-        best_mae, best_rmse, best_epoch = valid_mae, torch.sqrt(valid_mse), epoch
+        best_mae, best_rmse, best_loss, best_accuracy, best_epoch = valid_mae, valid_rmse, valid_loss, valid_accuracy ,epoch
         ########## SAVE MODEL #############
         torch.save(model.state_dict(), os.path.join(PATH, 'best_model.pt'))
 
-
-    s = 'MAE/RMSE: | Current Valid: %.2f/%.2f Ep. %d | Best Valid : %.2f/%.2f Ep. %d' % (
-        valid_mae, torch.sqrt(valid_mse), epoch, best_mae, best_rmse, best_epoch)
+    s = 'MAE/RMSE/Loss/Accuracy: | Current Valid: %.2f/%.2f/%.2f/%.2f%% Ep. %d | Best Valid : %.2f/%.2f/%.2f/%.2f%% Ep. %d' % (
+        valid_mae, valid_rmse, valid_loss, valid_accuracy, epoch+1, best_mae, best_rmse, best_loss, best_accuracy, best_epoch+1)
     print(s)
     with open(LOGFILE, 'a') as f:
         f.write('%s\n' % s)
@@ -421,18 +430,17 @@ for epoch in range(num_epochs):
 
 model.eval()
 with torch.set_grad_enabled(False):  # save memory during inference
+    train_mae, train_rmse, train_loss, train_accuracy = compute_metrics(
+        model, train_loader, device=DEVICE, cost_fn=cost_fn, imp=imp)
+    valid_mae, valid_rmse, valid_loss, valid_accuracy = compute_metrics(
+        model, valid_loader, device=DEVICE, cost_fn=cost_fn, imp=imp)
+    test_mae, test_rmse, test_loss, test_accuracy = compute_metrics(
+        model, test_loader, device=DEVICE, cost_fn=cost_fn, imp=imp)
 
-    train_mae, train_mse = compute_mae_and_mse(model, train_loader,
-                                               device=DEVICE)
-    valid_mae, valid_mse = compute_mae_and_mse(model, valid_loader,
-                                               device=DEVICE)
-    test_mae, test_mse = compute_mae_and_mse(model, test_loader,
-                                             device=DEVICE)
-
-    s = 'MAE/RMSE: | Train: %.2f/%.2f | Valid: %.2f/%.2f | Test: %.2f/%.2f' % (
-        train_mae, torch.sqrt(train_mse),
-        valid_mae, torch.sqrt(valid_mse),
-        test_mae, torch.sqrt(test_mse))
+    s = '\nMAE/RMSE/Loss/Accuracy: | Last Train: %.2f/%.2f/%.2f/%.2f%% | Last Valid: %.2f/%.2f/%.2f/%.2f%% | Last Test: %.2f/%.2f/%.2f/%.2f%%' % (
+        train_mae, train_rmse, train_loss, train_accuracy,
+        valid_mae, valid_rmse, valid_loss, valid_accuracy,
+        test_mae, test_rmse, test_loss, test_accuracy)
     print(s)
     with open(LOGFILE, 'a') as f:
         f.write('%s\n' % s)
@@ -444,25 +452,24 @@ with open(LOGFILE, 'a') as f:
 
 
 ########## EVALUATE BEST MODEL ######
-model.load_state_dict(torch.load(os.path.join(PATH, 'best_model.pt')))
+model.load_state_dict(torch.load(os.path.join(PATH, 'best_model.pt'), weights_only=True))
 model.eval()
 
 with torch.set_grad_enabled(False):
-    train_mae, train_mse = compute_mae_and_mse(model, train_loader,
-                                               device=DEVICE)
-    valid_mae, valid_mse = compute_mae_and_mse(model, valid_loader,
-                                               device=DEVICE)
-    test_mae, test_mse = compute_mae_and_mse(model, test_loader,
-                                             device=DEVICE)
+    train_mae, train_rmse, train_loss, train_accuracy = compute_metrics(
+        model, train_loader, device=DEVICE, cost_fn=cost_fn, imp=imp)
+    valid_mae, valid_rmse, valid_loss, valid_accuracy = compute_metrics(
+        model, valid_loader, device=DEVICE, cost_fn=cost_fn, imp=imp)
+    test_mae, test_rmse, test_loss, test_accuracy = compute_metrics(
+        model, test_loader, device=DEVICE, cost_fn=cost_fn, imp=imp)
 
-    s = 'MAE/RMSE: | Best Train: %.2f/%.2f | Best Valid: %.2f/%.2f | Best Test: %.2f/%.2f' % (
-        train_mae, torch.sqrt(train_mse),
-        valid_mae, torch.sqrt(valid_mse),
-        test_mae, torch.sqrt(test_mse))
+    s = '\nMAE/RMSE/Loss/Accuracy: | Best Train: %.2f/%.2f/%.2f/%.2f%% | Best Valid: %.2f/%.2f/%.2f/%.2f%% | Best Test: %.2f/%.2f/%.2f/%.2f%%' % (
+        train_mae, train_rmse, train_loss, train_accuracy,
+        valid_mae, valid_rmse, valid_loss, valid_accuracy,
+        test_mae, test_rmse, test_loss, test_accuracy)
     print(s)
     with open(LOGFILE, 'a') as f:
         f.write('%s\n' % s)
-
 
 ########## SAVE PREDICTIONS ######
 all_pred = []

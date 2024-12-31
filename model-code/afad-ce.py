@@ -23,9 +23,10 @@ from PIL import Image
 
 torch.backends.cudnn.deterministic = True
 
-TRAIN_CSV_PATH = './afad_train.csv'
-TEST_CSV_PATH = './afad_test.csv'
-IMAGE_PATH = '/shared_datasets/AFAD/orig/tarball/AFAD-Full'
+TRAIN_CSV_PATH = '../datasets/afad_train_0.4_3.csv'
+VALID_CSV_PATH = '../datasets/afad_valid.csv'
+TEST_CSV_PATH = '../datasets/afad_test.csv'
+IMAGE_PATH = '/home/vision/alireza-sm/datasets/AFAD-Full'
 
 
 # Argparse helper
@@ -93,7 +94,7 @@ with open(LOGFILE, 'w') as f:
 
 # Hyperparameters
 learning_rate = 0.0005
-num_epochs = 200
+num_epochs = 50
 
 # Architecture
 NUM_CLASSES = 26
@@ -119,7 +120,7 @@ class AFADDatasetAge(Dataset):
 
     def __getitem__(self, index):
         img = Image.open(os.path.join(self.img_dir,
-                                      self.img_paths[index]))
+                                      self.img_paths.iloc[index]))
 
         if self.transform is not None:
             img = self.transform(img)
@@ -149,12 +150,20 @@ test_dataset = AFADDatasetAge(csv_path=TEST_CSV_PATH,
                               img_dir=IMAGE_PATH,
                               transform=custom_transform2)
 
+valid_dataset = AFADDatasetAge(csv_path=VALID_CSV_PATH,
+                               img_dir=IMAGE_PATH,
+                               transform=custom_transform2)
+
 
 train_loader = DataLoader(dataset=train_dataset,
                           batch_size=BATCH_SIZE,
                           shuffle=True,
                           num_workers=NUM_WORKERS)
 
+valid_loader = DataLoader(dataset=valid_dataset,
+                          batch_size=BATCH_SIZE,
+                          shuffle=False,
+                          num_workers=NUM_WORKERS)
 test_loader = DataLoader(dataset=test_dataset,
                          batch_size=BATCH_SIZE,
                          shuffle=False,
@@ -340,17 +349,17 @@ for epoch in range(num_epochs):
 
     model.eval()
     with torch.set_grad_enabled(False):
-        test_mae, test_mse = compute_mae_and_mse(model, test_loader,
+        valid_mae, valid_mse = compute_mae_and_mse(model, valid_loader,
                                                 device=DEVICE)
 
-    if test_mae < best_mae:
-        best_mae, best_rmse, best_epoch = test_mae, torch.sqrt(test_mse), epoch
+    if valid_mae < best_mae:
+        best_mae, best_rmse, best_epoch = valid_mae, torch.sqrt(valid_mse), epoch
         ########## SAVE MODEL #############
         torch.save(model.state_dict(), os.path.join(PATH, 'best_model.pt'))
 
 
-    s = 'MAE/RMSE: | Current Test: %.2f/%.2f Ep. %d | Best Test : %.2f/%.2f Ep. %d' % (
-        test_mae, torch.sqrt(test_mse), epoch, best_mae, best_rmse, best_epoch)
+    s = 'MAE/RMSE: | Current Valid: %.2f/%.2f Ep. %d | Best Valid : %.2f/%.2f Ep. %d' % (
+        valid_mae, torch.sqrt(valid_mse), epoch, best_mae, best_rmse, best_epoch)
     print(s)
     with open(LOGFILE, 'a') as f:
         f.write('%s\n' % s)
@@ -365,11 +374,15 @@ with torch.set_grad_enabled(False):  # save memory during inference
 
     train_mae, train_mse = compute_mae_and_mse(model, train_loader,
                                                device=DEVICE)
+    valid_mae, valid_mse = compute_mae_and_mse(model, valid_loader,
+                                               device=DEVICE)
     test_mae, test_mse = compute_mae_and_mse(model, test_loader,
                                              device=DEVICE)
 
-    s = 'MAE/RMSE: | Train: %.2f/%.2f | Test: %.2f/%.2f' % (
-        train_mae, torch.sqrt(train_mse), test_mae, torch.sqrt(test_mse))
+    s = 'MAE/RMSE: | Train: %.2f/%.2f | Valid: %.2f/%.2f | Test: %.2f/%.2f' % (
+        train_mae, torch.sqrt(train_mse),
+        valid_mae, torch.sqrt(valid_mse),
+        test_mae, torch.sqrt(test_mse))
     print(s)
     with open(LOGFILE, 'a') as f:
         f.write('%s\n' % s)
